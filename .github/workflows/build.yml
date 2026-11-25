@@ -2,57 +2,55 @@ name: Build and Push to GHCR
 
 on:
   push:
-    tags:
-      - 'v*'
     branches:
       - main
   pull_request:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full 40-character commit SHA to publish. Publication runs only when this equals the dispatched commit.
+        required: true
+        type: string
 
 jobs:
-  get_tag:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Determine deployment tag
-        id: deployment_tag
-        run: |
-          if [[ '${{ github.ref_type }}' == 'tag' ]]; then
-            export tag=${{ github.ref_name }}
-            echo "version tag is $tag"
-            echo "id=$tag" >> $GITHUB_OUTPUT
-          else
-            export tag=latest
-            echo "version tag is $tag"
-            echo "id=$tag" >> $GITHUB_OUTPUT
-          fi
-    outputs:
-      deployment_tag: ${{ steps.deployment_tag.outputs.id }}
-
   build-and-push:
-    needs: [get_tag]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
+      - name: Refuse a dispatch that does not select this commit
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -eu
+          test "$RELEASE_SHA" = "$GITHUB_SHA"
+
       - name: Checkout code
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.release_sha == github.sha
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v7
+        id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/merkle-service:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/merkle-service:${{ needs.get_tag.outputs.deployment_tag }}
+          # Push, pull request, and tag events do not publish. A merge evaluates
+          # this file, so the merge itself cannot publish.
+          push: ${{ github.event_name == 'workflow_dispatch' && inputs.release_sha == github.sha }}
+          tags: ghcr.io/${{ github.repository_owner }}/merkle-service:${{ github.sha }}
+
+      - name: Record immutable digest
+        if: github.event_name == 'workflow_dispatch' && inputs.release_sha == github.sha
+        run: echo "image_digest=${{ steps.image.outputs.digest }}"
